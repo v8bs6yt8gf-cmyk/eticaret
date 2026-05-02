@@ -1,0 +1,9 @@
+.env
+vendor/
+node_modules/
+logs/
+uploads/
+*.zip
+*.sql
+*.bak
+.DS_Store
