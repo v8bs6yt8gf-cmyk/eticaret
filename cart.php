@@ -10,24 +10,24 @@ $subtotal = cart_total();
 
 // Handle cart actions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!verify_csrf()) { flash('danger', 'Invalid request.'); redirect('/cart.php'); }
+    if (!verify_csrf()) { flash('danger', 'Geçersiz istek.'); redirect('/cart.php'); }
 
     $action = $_POST['action'] ?? '';
 
     if ($action === 'update') {
         $itemId = (int)($_POST['item_id'] ?? 0);
-        $qty    = max(1, (int)($_POST['quantity'] ?? 1));
+        $qty    = max(1, min(99, (int)($_POST['quantity'] ?? 1)));
         $cartId = get_cart_id();
 
         if ($cartId && $itemId) {
             $stmt = $pdo->prepare("
                 UPDATE cart_items ci
                 JOIN products p ON p.id = ci.product_id
-                SET ci.quantity = LEAST(?, p.stock)
+                SET ci.quantity = LEAST(?, GREATEST(p.stock, 1))
                 WHERE ci.id = ? AND ci.cart_id = ?
             ");
             $stmt->execute([$qty, $itemId, $cartId]);
-            flash('success', 'Cart updated.');
+            flash('success', 'Sepet güncellendi.');
         }
     }
 
@@ -36,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cartId = get_cart_id();
         if ($cartId && $itemId) {
             $pdo->prepare("DELETE FROM cart_items WHERE id = ? AND cart_id = ?")->execute([$itemId, $cartId]);
-            flash('success', 'Item removed from cart.');
+            flash('success', 'Ürün sepetten kaldırıldı.');
         }
     }
 
@@ -44,7 +44,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $code   = strtoupper(trim($_POST['coupon_code'] ?? ''));
         $cartId = get_cart_id();
 
-        if ($cartId && $code) {
+        // Recompute subtotal in this request to avoid stale state
+        $currentSubtotal = cart_total();
+
+        if ($cartId && $code !== '' && mb_strlen($code) <= 50) {
             $stmt = $pdo->prepare("
                 SELECT * FROM coupons
                 WHERE code = ? AND is_active = 1
@@ -54,15 +57,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                   AND (max_uses IS NULL OR used_count < max_uses)
                 LIMIT 1
             ");
-            $stmt->execute([$code, $subtotal]);
+            $stmt->execute([$code, $currentSubtotal]);
             $coupon = $stmt->fetch();
 
             if ($coupon) {
                 $pdo->prepare("UPDATE carts SET coupon_id = ? WHERE id = ?")->execute([$coupon['id'], $cartId]);
-                flash('success', 'Coupon applied!');
+                flash('success', 'Kupon uygulandı!');
             } else {
-                flash('warning', 'Invalid or expired coupon code.');
+                flash('warning', 'Geçersiz veya süresi dolmuş kupon kodu.');
             }
+        } elseif ($code === '' && $cartId) {
+            $pdo->prepare("UPDATE carts SET coupon_id = NULL WHERE id = ?")->execute([$cartId]);
+            flash('success', 'Kupon kaldırıldı.');
         }
     }
 

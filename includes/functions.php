@@ -5,18 +5,27 @@
 
 // ─── Session ───────────────────────────────────────────
 if (session_status() === PHP_SESSION_NONE) {
-    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+    // Detect HTTPS even behind a reverse proxy / CDN.
+    $secure = (
+        (!empty($_SERVER['HTTPS']) && strtolower($_SERVER['HTTPS']) !== 'off')
+        || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https')
+        || (($_SERVER['HTTP_X_FORWARDED_SSL']   ?? '') === 'on')
+        || ((int)($_SERVER['SERVER_PORT'] ?? 0) === 443)
+    );
     session_set_cookie_params([
         'lifetime' => 0,
-        'path' => '/',
-        'domain' => '',
-        'secure' => $secure,
+        'path'     => '/',
+        'domain'   => '',
+        'secure'   => $secure,
         'httponly' => true,
-        'samesite' => 'Lax',
+        'samesite' => 'Strict',
     ]);
     ini_set('session.use_strict_mode', '1');
+    ini_set('session.use_only_cookies', '1');
     session_start();
 }
+
+require_once __DIR__ . '/security.php';
 
 // ─── URL Helpers ───────────────────────────────────────
 function app_base_path(): string {
@@ -51,10 +60,10 @@ if (!defined('APP_OUTPUT_REWRITE_STARTED')) {
         $base = app_base_path();
         if ($base === '') return $html;
         return strtr($html, [
-            'href="/' => 'href="' . $base . '/',
-            'src="/' => 'src="' . $base . '/',
+            'href="/'   => 'href="' . $base . '/',
+            'src="/'    => 'src="' . $base . '/',
             'action="/' => 'action="' . $base . '/',
-            "fetch('/" => "fetch('" . $base . '/',
+            "fetch('/"  => "fetch('" . $base . '/',
         ]);
     });
 }
@@ -97,7 +106,13 @@ function csrf_field(): string {
 
 function verify_csrf(): bool {
     $token = $_POST['_csrf_token'] ?? '';
-    return is_string($token) && hash_equals(csrf_token(), $token);
+    if (!is_string($token) || $token === '' || empty($_SESSION['_csrf_token'])) return false;
+    return hash_equals($_SESSION['_csrf_token'], $token);
+}
+
+function rotate_csrf(): void {
+    unset($_SESSION['_csrf_token']);
+    csrf_token();
 }
 
 // ─── Flash Messages ────────────────────────────────────
@@ -131,15 +146,23 @@ function current_user_id(): ?int {
 }
 
 function login_user(array $user): void {
+    global $pdo;
     session_regenerate_id(true);
-    $_SESSION['user_id']   = (int)$user['id'];
-    $_SESSION['user_name'] = (string)$user['name'];
-    $_SESSION['user_role'] = (string)$user['role'];
+    rotate_csrf();
+    $_SESSION['user_id']            = (int)$user['id'];
+    $_SESSION['user_name']          = (string)$user['name'];
+    $_SESSION['user_role']          = (string)$user['role'];
+    $_SESSION['session_started_at'] = time();
+
+    try {
+        $pdo->prepare("UPDATE users SET last_login_at = NOW(), last_login_ip = ?, failed_login_count = 0, locked_until = NULL WHERE id = ?")
+            ->execute([client_ip(), (int)$user['id']]);
+    } catch (PDOException $e) { /* schema may not yet include columns */ }
 }
 
 function require_login(): void {
     if (!is_logged_in()) {
-        flash('warning', 'Please log in to continue.');
+        flash('warning', 'Devam etmek için giriş yapın.');
         redirect('/login.php');
     }
 }
@@ -147,13 +170,33 @@ function require_login(): void {
 function require_admin(): void {
     if (!is_logged_in() || !is_admin()) {
         http_response_code(403);
-        die('Access denied.');
+        die('Erişim reddedildi.');
+    }
+    // Re-validate role from DB (logout if revoked)
+    ensure_active_admin_or_logout();
+}
+
+/**
+ * Rehash the password if its parameters are weaker than current policy.
+ * Call right after a successful password_verify().
+ */
+function maybe_rehash_password(int $userId, string $plainPassword, string $currentHash): void {
+    global $pdo;
+    if (password_needs_rehash($currentHash, PASSWORD_BCRYPT, ['cost' => 12])) {
+        $newHash = password_hash($plainPassword, PASSWORD_BCRYPT, ['cost' => 12]);
+        try {
+            $pdo->prepare("UPDATE users SET password = ? WHERE id = ?")->execute([$newHash, $userId]);
+        } catch (PDOException $e) { /* ignore */ }
     }
 }
 
 // ─── Slug Generator ────────────────────────────────────
 function slugify(string $text): string {
     $text = mb_strtolower($text, 'UTF-8');
+    $text = strtr($text, [
+        'ı'=>'i','ğ'=>'g','ü'=>'u','ş'=>'s','ö'=>'o','ç'=>'c',
+        'â'=>'a','î'=>'i','û'=>'u',
+    ]);
     $text = preg_replace('/[^a-z0-9\s-]/', '', $text);
     $text = preg_replace('/[\s-]+/', '-', $text);
     return trim($text, '-');
@@ -168,7 +211,7 @@ function format_price(float $amount): string {
 // ─── Cart Helpers ──────────────────────────────────────
 function get_cart_id(): ?int {
     global $pdo;
-    
+
     $userId    = current_user_id();
     $sessionId = session_id();
 
@@ -186,7 +229,7 @@ function get_cart_id(): ?int {
 
 function get_or_create_cart(): int {
     global $pdo;
-    
+
     $cartId = get_cart_id();
     if ($cartId) return $cartId;
 
@@ -200,7 +243,7 @@ function get_or_create_cart(): int {
 
 function cart_count(): int {
     global $pdo;
-    
+
     $cartId = get_cart_id();
     if (!$cartId) return 0;
 
@@ -211,7 +254,7 @@ function cart_count(): int {
 
 function cart_items(): array {
     global $pdo;
-    
+
     $cartId = get_cart_id();
     if (!$cartId) return [];
 
@@ -238,23 +281,20 @@ function cart_total(): float {
 
 function merge_cart_on_login(int $userId): void {
     global $pdo;
-    
+
     $sessionId = session_id();
 
-    // Find guest cart
     $stmt = $pdo->prepare("SELECT id FROM carts WHERE session_id = ? AND user_id IS NULL LIMIT 1");
     $stmt->execute([$sessionId]);
     $guestCart = $stmt->fetch();
 
     if (!$guestCart) return;
 
-    // Find or create user cart
     $stmt = $pdo->prepare("SELECT id FROM carts WHERE user_id = ? LIMIT 1");
     $stmt->execute([$userId]);
     $userCart = $stmt->fetch();
 
     if ($userCart) {
-        // Merge items
         $stmt = $pdo->prepare("
             INSERT INTO cart_items (cart_id, product_id, quantity)
             SELECT ?, product_id, quantity FROM cart_items WHERE cart_id = ?
@@ -269,11 +309,12 @@ function merge_cart_on_login(int $userId): void {
 
 // ─── Order Number Generator ───────────────────────────
 function generate_order_number(): string {
-    return 'ORD-' . strtoupper(date('Ymd')) . '-' . strtoupper(bin2hex(random_bytes(3)));
+    return 'ORD-' . strtoupper(date('Ymd')) . '-' . strtoupper(bin2hex(random_bytes(4)));
 }
 
 // ─── Pagination ────────────────────────────────────────
 function paginate(int $total, int $perPage, int $current): array {
+    $perPage    = max(1, min(100, $perPage));
     $totalPages = max(1, (int)ceil($total / $perPage));
     $current    = max(1, min($current, $totalPages));
     $offset     = ($current - 1) * $perPage;
@@ -291,9 +332,9 @@ function paginate(int $total, int $perPage, int $current): array {
 function upload_image(array $file, string $dir = 'uploads/products'): ?string {
     $allowed = [
         'image/jpeg' => 'jpg',
-        'image/png' => 'png',
+        'image/png'  => 'png',
         'image/webp' => 'webp',
-        'image/gif' => 'gif',
+        'image/gif'  => 'gif',
     ];
 
     if (($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) return null;
@@ -312,6 +353,12 @@ function upload_image(array $file, string $dir = 'uploads/products'): ?string {
 
     if (move_uploaded_file($file['tmp_name'], $path)) {
         @chmod($path, 0644);
+        // Defense in depth: ensure uploads/.htaccess denies PHP execution
+        $uploadsRoot = dirname(rtrim($dir, '/'));
+        $htaccess    = $uploadsRoot . '/.htaccess';
+        if (!is_file($htaccess) && is_writable($uploadsRoot)) {
+            @file_put_contents($htaccess, "Options -Indexes\n\n<FilesMatch \"\\.(php|phtml|phar|cgi|pl|py|sh)$\">\n    Require all denied\n</FilesMatch>\n");
+        }
         return $path;
     }
     return null;

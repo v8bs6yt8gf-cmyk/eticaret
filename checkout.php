@@ -153,9 +153,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmtStock->execute([$item['quantity'], $item['product_id']]);
         }
 
-        // Update coupon usage
+        // Update coupon usage atomically (extra defence on top of FOR UPDATE)
         if ($coupon) {
-            $pdo->prepare("UPDATE coupons SET used_count = used_count + 1 WHERE id = ?")->execute([$coupon['id']]);
+            $upd = $pdo->prepare(
+                "UPDATE coupons SET used_count = used_count + 1
+                 WHERE id = ? AND (max_uses IS NULL OR used_count < max_uses)"
+            );
+            $upd->execute([$coupon['id']]);
+            if ($upd->rowCount() === 0) {
+                throw new RuntimeException('Bu kupon az önce kullanım limitine ulaştı. Lütfen tekrar deneyin.');
+            }
         }
 
         // Clear cart
@@ -164,11 +171,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         $pdo->commit();
 
-        flash('success', "Order #{$orderNumber} placed successfully!");
+        audit_log('order.placed', 'order', $orderId, ['number' => $orderNumber, 'total' => $total]);
+
+        flash('success', "Sipariş #{$orderNumber} başarıyla oluşturuldu!");
         redirect('/order.php?id=' . $orderId);
 
-    } catch (Exception $e) {
-        $pdo->rollBack();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        error_log('[checkout] ' . $e->getMessage());
         flash('danger', $e->getMessage());
         redirect('/checkout.php');
     }

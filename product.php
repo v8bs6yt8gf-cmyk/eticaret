@@ -27,17 +27,24 @@ if (!$product) {
     exit;
 }
 
-// Increment view count
-$pdo->prepare("UPDATE products SET view_count = view_count + 1 WHERE id = ?")->execute([$product['id']]);
+// Increment view count (throttled per session per product to prevent spam)
+$viewKey = 'viewed_product_' . (int)$product['id'];
+if (empty($_SESSION[$viewKey]) || (time() - (int)$_SESSION[$viewKey]) > 3600) {
+    $pdo->prepare("UPDATE products SET view_count = view_count + 1 WHERE id = ?")->execute([$product['id']]);
+    $_SESSION[$viewKey] = time();
+}
+
+// Build a known-safe self-redirect target
+$selfUrl = '/product.php?slug=' . urlencode($slug);
 
 // Handle add to cart
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_to_cart'])) {
-    if (!verify_csrf()) { flash('danger', 'Invalid request.'); redirect($_SERVER['REQUEST_URI']); }
+    if (!verify_csrf()) { flash('danger', 'Geçersiz istek.'); redirect($selfUrl); }
 
-    $qty = max(1, (int)($_POST['quantity'] ?? 1));
+    $qty = max(1, min(99, (int)($_POST['quantity'] ?? 1)));
 
-    if ($product['stock'] < $qty) {
-        flash('warning', 'Not enough stock available.');
+    if ((int)$product['stock'] < $qty) {
+        flash('warning', 'Yeterli stok yok.');
     } else {
         $cartId = get_or_create_cart();
         // Check if already in cart
@@ -53,9 +60,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_to_cart'])) {
                 ->execute([$cartId, $product['id'], $qty]);
         }
 
-        flash('success', e($product['name']) . ' added to cart!');
+        flash('success', e($product['name']) . ' sepete eklendi!');
     }
-    redirect($_SERVER['REQUEST_URI']);
+    redirect($selfUrl);
 }
 
 $effectivePrice = $product['sale_price'] ?: $product['price'];

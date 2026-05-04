@@ -362,6 +362,14 @@ main, .site-main { min-height: 62vh; position: relative; z-index: 1; }
 .form-check-input:checked { background-color: var(--accent); border-color: var(--accent); }
 .input-group .form-control { border-radius: var(--radius-pill) 0 0 var(--radius-pill); }
 .input-group .btn-sm-gradient { border-radius: 0 var(--radius-pill) var(--radius-pill) 0; }
+.input-group-text {
+    border-color: var(--glass-border);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted) !important;
+}
+.input-group .input-group-text + .form-control {
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
 
 .empty-state { text-align: center; padding: 3rem 1.5rem; color: var(--text-secondary); }
 .empty-state i { font-size: 3rem; color: #fde68a; }

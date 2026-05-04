@@ -34,8 +34,13 @@ try {
         PDO::ATTR_EMULATE_PREPARES   => false,
     ]);
 } catch (PDOException $e) {
+    error_log('[db connect] ' . $e->getMessage());
     if (($config['app_env'] ?? 'production') === 'development') {
         die('Database Error: ' . $e->getMessage());
     }
     die('A database error occurred. Please try again later.');
 }
+
+// Run pending schema migrations once per request
+require_once __DIR__ . '/../includes/migrations.php';
+run_pending_migrations($pdo);

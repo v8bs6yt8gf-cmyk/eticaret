@@ -1,9 +1,25 @@
+# ─── Secrets ──────────────────────────────────────────
 .env
+config/local.php
+installed.lock
+
+# ─── Uploads / runtime ────────────────────────────────
+uploads/
+logs/
+.write_test
+*.log
+
+# ─── Vendored / generated ─────────────────────────────
 vendor/
 node_modules/
-logs/
-uploads/
+
+# ─── Backups & dumps ──────────────────────────────────
 *.zip
-*.sql
 *.bak
+*.sql
+
+# ─── OS / editors ─────────────────────────────────────
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
